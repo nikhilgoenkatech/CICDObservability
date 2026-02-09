@@ -1,0 +1,71 @@
+{
+  "id": "e264cba0-e48e-41f9-8f66-1bf3ff07fd36",
+  "title": "Pull & Push Bizevents - Azure DevOps",
+  "description": "",
+  "actor": "56950d1e-d9e8-4c6f-9c70-46b093c4434d",
+  "owner": "56950d1e-d9e8-4c6f-9c70-46b093c4434d",
+  "ownerType": "USER",
+  "isPrivate": false,
+  "schemaVersion": 3,
+  "trigger": {
+    "schedule": {
+      "isActive": false,
+      "isFaulty": false,
+      "trigger": {
+        "type": "interval",
+        "intervalMinutes": 60
+      },
+      "rule": null,
+      "filterParameters": {
+        "earliestStart": "2024-04-18",
+        "earliestStartTime": "00:00"
+      },
+      "timezone": "Australia/Sydney",
+      "inputs": {}
+    }
+  },
+  "result": null,
+  "type": "STANDARD",
+  "input": {},
+  "hourlyExecutionLimit": 1000,
+  "guide": null,
+  "tasks": {
+    "pull_azuredevops_push_bizevent": {
+      "name": "pull_azuredevops_push_bizevent",
+      "input": {
+        "script": "import { execution } from '@dynatrace-sdk/automation-utils';\nimport { businessEventsClient } from '@dynatrace-sdk/client-classic-environment-v2';\nimport { credentialVaultClient } from \"@dynatrace-sdk/client-classic-environment-v2\";\n\nasync function getCompletedBuildsAndTimelines() {\n  const organization = 'nikhilgoenka';\n  const project = 'data-populate';\n  const pat = 'PAT';\n  const baseUrl = `https://dev.azure.com/${organization}/${project}/_apis`;\n\n  try {\n    const buildsUrl = `${baseUrl}/build/builds?status=completed`;\n    const buildsResponse = await makeRequest(buildsUrl, pat);\n\n    console.log('Fetched builds:', buildsResponse.count);\n    const buildTimelines = [];\n    const startTimeEpoch = Date.now() - 60000 * 60 * 1000; // 1 hour ago\n    const endTimeEpoch = Date.now();\n\n    for (const build of buildsResponse.value) {\n      const buildId = build.id;\n\n      console.log(\"Processing build:\", buildId);\n      \n      const buildStart = new Date(build.startTime).getTime();\n      const buildEnd = new Date(build.finishTime).getTime();\n\n      if (buildStart >= startTimeEpoch && buildEnd < endTimeEpoch) {\n        const job_name = build.definition.name;\n        const buildReason = build.triggerInfo['ci.message'] || \"None\";\n        \n        const buildDetail = {\n          \"project-name\": job_name,\n          \"pipeline-number\": buildId,\n          \"pipeline-started_at\": buildStart,\n          \"pipeline-status\": build.result,\n          \"pipeline-duration\": buildEnd - buildStart,\n          \"pipeline-username\": build.requestedFor?.displayName || 'Unknown',\n          \"pipeline-triggered_by\": buildReason,\n          \"event.type\": \"pipeline\",\n          \"event.provider\": \"azure-devops\"\n        };\n        console.log('Pipeline detail:', buildDetail);\n\n        await businessEventsClient.ingest({\n          body: buildDetail,\n          type: 'application/json',\n        });\n\n        const timelineUrl = `${baseUrl}/build/Builds/${buildId}/timeline`;\n        const timelinedata = await makeRequest(timelineUrl, pat);\n        \n        buildTimelines.push({ buildNumber: buildId, timeline: timelinedata });\n      }\n    }\n    return buildTimelines;\n  } catch (error) {\n    console.error('Error in getCompletedBuildsAndTimelines:', error);\n    throw error;\n  }\n}\n\nasync function makeRequest(url, pat) {\n  const options = {\n    method: 'GET',\n    headers: {\n      'Authorization': `Basic ${Buffer.from(`:${pat}`).toString('base64')}`,\n      'Content-Type': 'application/json'\n    }\n  };\n  \n  try {\n    const response = await fetch(url, options);\n    if (!response.ok) {\n      throw new Error(`HTTP error! status: ${response.status}`);\n    }\n    return await response.json();\n  } catch (error) {\n    console.error(`Error making request to ${url}:`, error);\n    throw error;\n  }\n}\n\ngetCompletedBuildsAndTimelines().then(function(buildTimelines) {\n  console.log('Processing completed builds and timelines');\n\n  for (const build of buildTimelines) {\n    const stageData = []; \n    \n    for (const item of build.timeline.records) {\n      if (item.type === \"Task\") {\n        const startTimeEpoch = Date.now() - 60000 * 60 * 1000; // 1 hour ago\n        const endTimeEpoch = Date.now();\n\n        const buildStart = new Date(item.startTime).getTime();\n        const buildEnd = new Date(item.finishTime).getTime();   \n\n        if (buildStart >= startTimeEpoch && buildEnd < endTimeEpoch) {\n          stageData.push({\n            jobname: build.timeline.records.find(function(r) { return r.type === \"Job\"; })?.name || 'Unknown',\n            stagename: item.name,\n            startTime: item.startTime,\n            finishTime: item.finishTime,\n            status: item.result,\n            stageDuration: new Date(item.finishTime) - new Date(item.startTime),\n            \"event.type\": \"job\",\n            \"event.provider\": \"azure-devOps\"\n          });\n        }\n      }\n    }\n\n    console.log(\"Stage data:\");        \n    for (const stage of stageData) {\n      businessEventsClient.ingest({\n         body: stage,\n         type: 'application/json',\n      });\n      console.log(\"Job_name: \" + stage.jobname + \" -> Name: \" + stage.stagename + \" -> \" + stage.startTime + \" -> \" + stage.finishTime);\n    }\n  }\n}).catch(function(error) {\n  console.error('Error in main execution:', error);\n});\n"
+      },
+      "action": "dynatrace.automations:run-javascript",
+      "position": {
+        "x": 0,
+        "y": 2
+      },
+      "conditions": {
+        "states": {
+          "pull_azuredevops_data_n_push_bizevents": "OK"
+        }
+      },
+      "description": "Build a custom task running js Code",
+      "predecessors": [
+        "pull_azuredevops_data_n_push_bizevents"
+      ]
+    },
+    "pull_azuredevops_data_n_push_bizevents": {
+      "name": "pull_azuredevops_data_n_push_bizevents",
+      "input": {
+        "script": "import { execution } from '@dynatrace-sdk/automation-utils';\nimport { businessEventsClient } from '@dynatrace-sdk/client-classic-environment-v2';\nimport { credentialVaultClient } from \"@dynatrace-sdk/client-classic-environment-v2\";\n\nasync function getCompletedBuildsAndTimelines() {\n  //const organization = 'leepritchard0065';\n  //const project = 'My Gov Demo'; // Fixed: Added closing quotation mark\n  //const pat = 'xxx';\n  const organization = 'nikhilgoenka';\n  const project = 'data-populate';\n  const pat = 'PAT';\n  const baseUrl = `https://dev.azure.com/${organization}/${project}/_apis`;\n\n  const buildsUrl = `${baseUrl}/build/builds?status=completed`;\n  const buildsResponse = await makeRequest(buildsUrl, pat);\n\n  console.log(buildsResponse);\n  const buildTimelines = [];\n  for (const build of buildsResponse.value) {\n    const buildId = build.id;\n    if (buildId != '26') {\n      console.log(\"Calling for \", buildId);\n      \n      const startTimeEpoch = Date.now() - 6000000 * 60 * 1000; //1 is the minutes\n      const endTimeEpoch = Date.now();\n\n      var timeString = build.startTime.replace('Z', '');\n      var date = new Date(timeString);\n      var buildStart = date.getTime();\n    \n      timeString = build.finishTime.replace('Z', '');\n      date = new Date(timeString);\n      var buildEnd = date.getTime();\n\n      if (buildStart >= startTimeEpoch && buildEnd < endTimeEpoch) {\n        var job_name = build.definition['name'];\n        \n        var buildReason = \"None\";\n        if (Object.keys(build.triggerInfo).length != 0) {\n          buildReason = build.triggerInfo['ci.message'];\n        }\n        const buildDetail = {\n                 \"job-name\": build.jobname,\n                 \"buildNumber\": buildId,\n                 \"buildTimestamp\": buildStart,\n                 \"status\": build.result,\n                 \"buildDuration\": buildEnd - buildStart,\n                 \"buildUserName\": build.requestedFor?.displayName || 'Unknown',\n                 \"buildResult\": build.result,\n                 \"buildreason\": buildReason,\n                 \"event.type\": \"azure-devops-lee\"\n          };\n        console.log(buildDetail);\n//        businessEventsClient.ingest({\n//            body: buildDetail,\n//            type: 'application/json',\n//      })\n        \n        const timelineUrl = `${baseUrl}/build/Builds/${buildId}/timeline`;\n  \n        const headers = {\n          method: 'GET',\n          headers: {\n            'Authorization': `Basic ${btoa(` :${pat}`)}`,\n            'Content-Type': 'application/json'\n          }\n        };\n        const response = await fetch(timelineUrl, headers);\n        const timelinedata = await response.json();\n        \n        buildTimelines.push({ buildNumber: buildId, timeline: timelinedata });\n      }\n    }\n  }\n  return buildTimelines;\n}\n\nasync function makeRequest(url, pat) {\n  const options = {\n    method: 'GET',\n    headers: {\n      'Authorization': `Basic ${btoa(` :${pat}`)}`,\n      'Content-Type': 'application/json'\n    }\n  };\n  const response = await fetch(url, options);\n  if (!response.ok) {\n    throw new Error(`Error: ${response.status}`);\n  }\n  const data = await response.json();\n  return data;\n}\n\ngetCompletedBuildsAndTimelines().then(buildTimelines => {\n  console.log('Completed builds and timelines:');\n\n  for (const build of buildTimelines) {\n    var stageData = []; \n    \n    for (var i = 0; i < build.timeline.records.length; i++) {\n        var item = build.timeline.records[i];\n        if (item.type === \"Task\") {\n\n        const startTimeEpoch = Date.now() - 60000 * 60 * 1000; //1 is the minutes\n        const endTimeEpoch = Date.now();\n\n        var timeString = item.startTime.replace('Z', '');\n        var date = new Date(timeString);\n        var buildStart = date.getTime();\n    \n        timeString = item.finishTime.replace('Z', '');\n        date = new Date(timeString);\n        var buildEnd = date.getTime();   \n\n        if (buildStart >= startTimeEpoch && buildEnd < endTimeEpoch) {\n              stageData.push({\n                  jobname: job_name,\n                  stagename: item.name,\n                  startTime: item.startTime,\n                  finishTime: item.finishTime,\n                  status: item.result,\n                  stageDuration: (item.endTime)-(item.startTime), \n                  \"event.type\":\"azuredevops-stageDetail\"\n          });\n        }\n      }\n    }\n    console.log(\"Stage data:\");        \n    for (var j = 0; j < stageData.length; j++) {\n        var stage = stageData[j];\n    //businessEventsClient.ingest({\n    //        body: stage,\n    //        type: 'application/json',\n    //})\n    console.log(\"Job_name:\" + job_name, \" -> Name: \" + stage.stagename + \" -> \" + stage.startTime + \" -> \" + stage.finishTime); // Fixed: Use stagename instead of name\n    }\n  }\n})\n.catch(error => {\n  console.error('Error:', error);\n});\n"
+      },
+      "action": "dynatrace.automations:run-javascript",
+      "active": false,
+      "position": {
+        "x": 0,
+        "y": 1
+      },
+      "conditions": {
+        "states": {}
+      },
+      "description": "Build a custom task running js Code",
+      "predecessors": []
+    }
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "42daceda-9cea-43d1-93f8-586ed682c991",
+  "title": "Pull & Push Bizevents - Nikhil",
+  "description": "",
+  "actor": "56950d1e-d9e8-4c6f-9c70-46b093c4434d",
+  "owner": "56950d1e-d9e8-4c6f-9c70-46b093c4434d",
+  "ownerType": "USER",
+  "isPrivate": false,
+  "schemaVersion": 3,
+  "trigger": {
+    "schedule": {
+      "isActive": false,
+      "isFaulty": false,
+      "trigger": {
+        "type": "interval",
+        "intervalMinutes": 60
+      },
+      "rule": null,
+      "filterParameters": {
+        "earliestStart": "2024-04-18",
+        "earliestStartTime": "00:00"
+      },
+      "timezone": "Australia/Sydney",
+      "inputs": {}
+    }
+  },
+  "result": null,
+  "type": "STANDARD",
+  "input": {},
+  "hourlyExecutionLimit": 1000,
+  "guide": null,
+  "tasks": {
+    "pull_jenkins_data_n_push_bizevents": {
+      "name": "pull_jenkins_data_n_push_bizevents",
+      "input": {
+        "script": "/*\n* This function will run in the DYNATRACE JavaScript runtime.\n* For information visit https://dt-url.net/functions-help\n*/\nimport { execution } from '@dynatrace-sdk/automation-utils';\nimport { businessEventsClient } from '@dynatrace-sdk/client-classic-environment-v2';\nimport { credentialVaultClient } from \"@dynatrace-sdk/client-classic-environment-v2\";\n\n/*Function to pull credentials from vault */\nasync function getConstant (credentials_uuid) {\n  console.log(credentials_uuid);\n  \n  const token = await credentialVaultClient.getCredentialsDetails({\n       id: credentials_uuid,\n    });\n  //console.log(token.text());\n  return token;\n}\n\n/*Function to pull build data from CICD tool - in this case, Jenkins*/\nexport default async function ( {execution_id} ) {\n  //let jenkinsBaseUrl = (await getConstant(\"CREDENTIALS_VAULT-86319D972B0D3B84\")).token;\n  let jenkinsBaseUrl = \"http://myjenkins/\";\n  let jenkins_credentials = await getConstant(\"CREDENTIALS_VAULT-86319D972B0D3B84\");\n  const JENKINS_USER = jenkins_credentials.username;\n  const JENKINS_API_TOKEN=jenkins_credentials.password;\n  console.log(JENKINS_API_TOKEN);\n  \n  // Fetch Jenkins crumb\n  const crumbResponse = await fetch(`${jenkinsBaseUrl}/crumbIssuer/api/xml`, {\n    headers: {\n      'Authorization': `Basic ${btoa(JENKINS_USER + ':' + JENKINS_API_TOKEN)}`,\n    },\n  });\n  if (!crumbResponse.ok) {\n    const crumbResponseText = await crumbResponse.text();\n    throw new Error(`Failed to fetch Jenkins crumb. Response status: ${crumbResponse.status}. Response text: ${crumbResponseText}`);\n  }\n  const crumbXml = await crumbResponse.text();\n  const crumb = (crumbXml.match(/<crumb>(.*?)<\\/crumb>/) || [])[1];\n\n  const apiPullJobNames = `${jenkinsBaseUrl}/api/json?tree=jobs[name]`;\n  console.log(apiPullJobNames);\n  const jobsResponse = await fetch(apiPullJobNames, {\n    method: 'GET',\n    headers: {\n      'Authorization': `Basic ${btoa(JENKINS_USER + ':' + JENKINS_API_TOKEN)}`,\n      'Jenkins-Crumb': crumb,\n    },\n  });\n  if (!jobsResponse.ok) {\n    const jobsResponseText = await jobsResponse.text();\n    throw new Error(`Failed to fetch Jenkins build. Response status: ${jobsResponse.status}. Response text: ${jobsResponseText}`);\n  }\n  const responseData = await jobsResponse.json();\n  const jobNames=[];\n  for (const jobname of responseData.jobs) {\n    jobNames.push(jobname.name);\n  }\n  console.log(jobNames);\n  for (const jobName of jobNames) {\n    const apiUrl = `${jenkinsBaseUrl}/job/${jobName}/api/json?tree=builds[number,url,timestamp,building,duration,result,actions[causes[*]]]{0,500}`;\n  \n    // Fetch builds within the timeframe\n    const buildsResponse = await fetch(apiUrl, {\n      method: 'POST',\n      headers: {\n        'Authorization': `Basic ${btoa(JENKINS_USER + ':' + JENKINS_API_TOKEN)}`,\n        'Jenkins-Crumb': crumb,\n      },\n    });\n  \n    if (!buildsResponse.ok) {\n      const buildsResponseText = await buildsResponse.text();\n      throw new Error(`Failed to fetch Jenkins builds. Response status: ${buildsResponse.status}. Response text: ${buildsResponseText}`);\n    }\n    const buildsData = await buildsResponse.json();\n    console.log(jobName);\n    bizevents(buildsData, jenkinsBaseUrl, JENKINS_USER, JENKINS_API_TOKEN, jobName, crumb);\n  }\n}\n\n/*Function to send the build details as bizevents*/\nasync function bizevents ( buildsData, jenkinsBaseUrl, JENKINS_USER, JENKINS_API_TOKEN, jobName, crumb ) {\n    \n  const startTimeEpoch = Date.now() - 60 * 60 * 24 * 1000; //60 is the minutes\n  const endTimeEpoch = Date.now();\n\n  const builds=[];\n  // Process each build\n  if (buildsData && buildsData.builds) {\n    for (const build of buildsData.builds) {\n      let buildTimestampEpoch = build.timestamp;\n      if (build.result && (buildTimestampEpoch >= startTimeEpoch && buildTimestampEpoch <= endTimeEpoch)) {\n        builds.push(build.number);\n        const buildNumber = build.number;\n        const buildUrl = build.url;\n        const buildTimestamp = build.timestamp;\n        const buildStatus = build.building ? 'Building' : (build.result === 'SUCCESS' ? 'Success' : 'Failure');\n        const buildDuration = build.duration;\n        const result = build.result;\n        \n        let buildUserId = 'Unknown';\n        let buildUserName = 'NoName';\n        const eventType = 'buildevents';\n        const buildCausesAction = build.actions && build.actions.find((action) => action && action._class === 'hudson.model.CauseAction');\n        const buildCauses = buildCausesAction ? buildCausesAction.causes : [];\n  \n        for (const cause of buildCauses) {\n          if (cause._class === 'hudson.model.Cause$UserIdCause') {\n            buildUserId = cause.userId;\n            buildUserName = cause.userName;\n            break;\n          }\n        }\n        console.log(builds);\n        //Populate bizevents object from buildsData\n        const buildDetail = {\n               \"job-name\": jobName,\n               \"buildNumber\": buildNumber,\n               \"buildTimestamp\": buildTimestamp,\n               \"status\": buildStatus,\n               \"buildDuration\": buildDuration,\n               \"buildUserId\": buildUserId,\n               \"buildUserName\": buildUserName,\n               \"buildResult\":result,\n               \"event.type\":eventType\n        };\n        businessEventsClient\n        .ingest({\n        body: buildDetail,\n        type: 'application/json',\n     })\n     .then(() => console.log('Event ingested'))\n     .catch((e) => console.error('Failed to ingest event: ' + e));\n\n      }\n    }\n    identifyStageDetailAndPushAsBizevents(builds, jenkinsBaseUrl, JENKINS_USER, JENKINS_API_TOKEN, jobName, crumb);\n  }\n}\n\nasync function identifyStageDetailAndPushAsBizevents(builds, jenkinsBaseUrl, JENKINS_USER, JENKINS_API_TOKEN, jobName, crumb) {\n  console.log(\"in identifyStageDetail\");\n  \n  // Get details of the various stages of the build\n  for (const build of builds) {\n    const apiUrl = `${jenkinsBaseUrl}/job/${jobName}/${build}/wfapi/describe`;\n    console.log(apiUrl);\n    // Fetch builds within the timeframe\n    const buildsResponse = await fetch(apiUrl, {\n      method: 'POST',\n      headers: {\n        'Authorization': `Basic ${btoa(JENKINS_USER + ':' + JENKINS_API_TOKEN)}`,\n        'Jenkins-Crumb': crumb,\n      },\n    });\n\n    if (!buildsResponse.ok) {\n      const buildsResponseText = await buildsResponse.text();\n      throw new Error(`Failed to fetch Jenkins build details. Response status: ${buildsResponse.status}. Response text: ${buildsResponseText}`);\n    }\n    const stagesData = await buildsResponse.json();\n    \n    for (let j = 0; j < stagesData[\"stages\"].length; j++) {\n      const stageDetail = {\n                 \"jobname\": jobName,\n                 \"buildnumber\": stagesData[\"id\"],\n                 \"stagename\": stagesData[\"stages\"][j][\"name\"],\n                 \"status\": stagesData[\"stages\"][j][\"status\"],\n                 \"stageDuration\": stagesData[\"stages\"][j][\"durationMillis\"],\n                 \"pauseInQueueDuration\":stagesData[\"stages\"][j][\"pauseDurationMillis\"],\n                 \"event.type\":\"stageType\"\n        };\n        console.log(\"STAGESDATA\");\n        console.log(stageDetail);\n        businessEventsClient.ingest({\n            body: stageDetail,\n            type: 'application/json',\n      })\n      .then(() => console.log('Event ingested'))\n      .catch((e) => console.error('Failed to ingest event: ' + e));\n    }\n   }\n  }"
+      },
+      "action": "dynatrace.automations:run-javascript",
+      "position": {
+        "x": 0,
+        "y": 1
+      },
+      "description": "Build a custom task running js Code",
+      "predecessors": []
+    }
+  }
+}
